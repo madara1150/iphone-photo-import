@@ -1,0 +1,90 @@
+# Build the macOS DMG and the Windows installer + portable zip, then publish a GitHub Release.
+# Runs when a tag like v1.2.3 is pushed (or by hand from the Actions tab).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r requirements-dev.txt
+          QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
+      - name: Build DMG
+        run: |
+          export APP_VERSION="${TAG#v}"
+          PYTHON=python ./build_mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/iPhonePhotoImport-macOS.dmg
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/Scripts/pip install -q -r requirements-dev.txt
+          QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest -q
+          .venv/Scripts/python -c "import app.devices.windows; print('windows backend imports OK')"
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build installer and portable zip
+        shell: cmd
+        run: |
+          set APP_VERSION=%TAG:~1%
+          call build_windows.bat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/iPhonePhotoImport-Windows-Setup.exe
+            dist/iPhonePhotoImport-Windows-Portable.zip
+          if-no-files-found: error
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: cd out && sha256sum * | tee SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: iPhone Photo Import ${{ env.TAG }}
+          body_path: .github/release-notes.md
+          files: out/*
